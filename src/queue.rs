@@ -1,4 +1,6 @@
 mod queue {
+    use std::sync::Mutex;
+
     struct Buffer {
         index: usize,
         size: usize,
@@ -14,9 +16,10 @@ mod queue {
     }
 
     pub struct Manager {
-        queues: std::collections::HashMap<Item>,
-        buffer_capacity: usize,
+        queues: std::collections::HashMap<u64, Item>,
+        queue_buffer_capacity: usize,
         packet_interval: i64,
+        lock: Mutex<Manager>,
         shutting_down: bool,
         queue_linked: std::collections::LinkedList<Item>
     }
