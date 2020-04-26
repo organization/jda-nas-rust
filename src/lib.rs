@@ -5,6 +5,15 @@ use jni::sys::{jboolean, jint, jlong, jobject, jstring};
 use std::ffi::c_void;
 
 mod packet;
+mod queue;
+
+struct Manager {
+    manager: Box<queue::Manager>
+}
+
+impl Manager {
+    
+}
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_create(
