@@ -9,25 +9,25 @@ pub struct Buffer {
 }
 
 pub struct Item {
-    pub next_due_time: i64,
+    pub next_due_time: u128,
     pub packet_buffer: Vec<packet::Queued>,
     pub buffer: Buffer,
     pub address: Vec<dns_lookup::AddrInfo>,
-    pub explicit_socket: tokio::net::UdpSocket,
+    pub explicit_socket: Option<tokio::net::UdpSocket>,
 }
 
 pub struct Manager {
-    queues: std::collections::HashMap<u64, Item>,
-    queue_buffer_capacity: usize,
-    packet_interval: i64,
-    shutting_down: bool,
-    queue_linked: std::collections::LinkedList<Item>,
+    pub queues: std::collections::HashMap<u64, Item>,
+    pub queue_buffer_capacity: usize,
+    pub packet_interval: u128,
+    pub shutting_down: bool,
+    pub queue_linked: std::collections::LinkedList<Item>,
 }
 
 impl Manager {
     pub fn new(
         queue_buffer_capacity: usize,
-        packet_interval: i64,
+        packet_interval: u128,
     ) -> Manager {
         Manager {
             queues: Default::default(),
