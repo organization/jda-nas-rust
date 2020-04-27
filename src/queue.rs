@@ -35,10 +35,7 @@ pub struct Manager<'a> {
 }
 
 impl Manager<'_> {
-    pub fn new<'a>(
-        queue_buffer_capacity: usize,
-        packet_interval: u128,
-    ) -> Manager<'a> {
+    pub fn new<'a>(queue_buffer_capacity: usize, packet_interval: u128) -> Manager<'a> {
         Manager {
             queues: Default::default(),
             queue_buffer_capacity,
