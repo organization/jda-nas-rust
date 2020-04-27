@@ -1,9 +1,9 @@
-use std::{ptr, thread};
-use std::borrow::Borrow;
+use std::{ptr, slice, thread};
+use std::borrow::{Borrow, BorrowMut};
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList};
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::ptr::null;
@@ -16,8 +16,6 @@ use jni::errors::jni_error_code_to_result;
 use jni::objects::{JByteBuffer, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jobject, jstring};
 use tokio::net::UdpSocket;
-
-use jvmti_sys::jvmtiCapabilities;
 
 mod packet;
 mod queue;
@@ -49,7 +47,7 @@ impl Manager {
     fn destroy(
         &self
     ) {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
         if !lock.is_none() {
             let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
             manager.get_mut().shutting_down = true;
@@ -60,16 +58,17 @@ impl Manager {
         &self,
         key: u64,
     ) -> usize {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
 
         if !lock.is_none() {
             let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
-            let queue = manager.get_mut().queues[key];
+            let queue = manager.get_mut().queues.get(&key);
 
             if queue.is_none() {
-                queue.queue_buffer_capacity as usize
+                manager.get_mut().queue_buffer_capacity as usize
             } else {
-                queue.buffer_capacity - queue.buffer_size
+                let unwrapped_queue = queue.unwrap();
+                unwrapped_queue.buffer.capacity - unwrapped_queue.buffer.size
             }
         } else {
             0
@@ -77,8 +76,9 @@ impl Manager {
     }
 
     fn resolve_address(
+        &self,
         address: &str,
-        port: i32
+        port: i32,
     ) -> Vec<AddrInfo> {
         let hints = dns_lookup::AddrInfoHints {
             socktype: dns_lookup::SockType::DGram.into(),
@@ -100,7 +100,7 @@ impl Manager {
         data_length: usize,
         explicit_socket: Option<UdpSocket>,
     ) -> bool {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
 
         if !lock.is_none() {
             let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
@@ -113,11 +113,13 @@ impl Manager {
                     port,
                 );
 
-                if address.empty() {
-                    false
+                if address.is_empty() {
+                    return false
                 }
 
-                manager.get_mut().queues.insert(
+                let manager_mut = manager.get_mut();
+
+                let inserted_item = manager_mut.queues.insert(
                     key,
                     queue::Item {
                         next_due_time: 0,
@@ -125,13 +127,13 @@ impl Manager {
                         buffer: queue::Buffer {
                             index: 0,
                             size: 0,
-                            capacity: manager.get_mut().queue_buffer_capacity,
+                            capacity: manager_mut.queue_buffer_capacity,
                         },
                         address,
                         explicit_socket,
                     },
                 );
-                manager.get_mut().queue_linked.push_front(inserted_item);
+                manager.get_mut().queue_linked.push_front(inserted_item.unwrap());
             }
 
             let item: Option<&queue::Item> = manager.get_mut().queues.get(key.borrow());
@@ -142,14 +144,14 @@ impl Manager {
                 let unwrapped_item = item.unwrap();
 
                 if unwrapped_item.buffer.size >= unwrapped_item.buffer.capacity {
-                    false
+                    return false
                 }
 
                 let next_index = (unwrapped_item.buffer.index + unwrapped_item.buffer.size) % unwrapped_item.buffer.capacity;
 
-                &unwrapped_item.packet_buffer[next_index].data = &data;
-                &unwrapped_item.packet_buffer[next_index].data_length = &data_length;
-                &unwrapped_item.buffer.size += 1;
+                unwrapped_item.packet_buffer[next_index].data = data;
+                unwrapped_item.packet_buffer[next_index].data_length = data_length;
+                unwrapped_item.buffer.size += 1;
 
                 true
             }
@@ -163,10 +165,11 @@ impl Manager {
         key: u64,
     ) -> bool {
         let lock = self.boxed_manager_mutex.try_lock();
+        let ok_lock = lock.ok();
 
-        if !lock.is_none() {
-            let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
-            let item: Option<&queue::Item> = manager.get_mut().queues.get(key.borrow());
+        if !ok_lock.is_none() {
+            let mut manager = ok_lock.unwrap();
+            let item = manager.get_mut().queues.get(key.borrow());
 
             if item.is_none() {
                 false
@@ -174,14 +177,14 @@ impl Manager {
                 let unwrapped_item = item.unwrap();
 
                 if unwrapped_item.buffer.size <= 0 {
-                    false
+                    return false
                 }
 
                 while unwrapped_item.buffer.size > 0 {
                     let index = unwrapped_item.buffer.index;
 
-                    &unwrapped_item.buffer.index = ((unwrapped_item.buffer.index + 1) % unwrapped_item.buffer.capacity).borrow();
-                    &unwrapped_item.buffer.size -= 1;
+                    unwrapped_item.buffer.index = *((unwrapped_item.buffer.index + 1) % unwrapped_item.buffer.capacity).borrow();
+                    unwrapped_item.buffer.size -= 1;
 
                     (&unwrapped_item.packet_buffer).remove(index);
                 }
@@ -197,36 +200,39 @@ impl Manager {
         &self,
         current_time: u128,
     ) -> u128 {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
 
         if !lock.is_none() {
             let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
-            let item: Option<&queue::Item> = *manager.get_mut().queue_linked.front();
+            let item: Option<&queue::Item> = manager.get_mut().queue_linked.front();
 
             if item.is_none() {
                 current_time + manager.get_mut().packet_interval
             } else {
                 item.unwrap().next_due_time
             }
+        } else {
+            current_time
         }
     }
 
     fn queue_pop_packet(
-        item: &queue::Item
+        &self,
+        item: &mut queue::Item,
     ) -> packet::Unsent {
         let index = item.buffer.index;
-        let _packet = *item.packet_buffer[index];
+        let _packet = item.packet_buffer[index];
 
-        &item.buffer.index = ((item.buffer.index + 1) % item.buffer.capacity).borrow();
-        &item.buffer.size -= 1;
+        item.buffer.index = *((item.buffer.index + 1) % item.buffer.capacity).borrow();
+        item.buffer.size -= 1;
 
         let unsent_packet = packet::Unsent {
             packet: _packet,
             address: item.address,
             explicit_socket: item.explicit_socket,
-        }
+        };
 
-            (&item.packet_buffer).remove(index);
+        &item.packet_buffer.remove(index);
 
         return unsent_packet;
     }
@@ -235,55 +241,57 @@ impl Manager {
         &self,
         mut current_time: u128,
     ) -> (Option<packet::Unsent>, u128) {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
 
         if !lock.is_none() {
-            let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
-            let item: Option<&queue::Item> = *manager.get_mut().queue_linked.front();
+            let mut manager = lock.unwrap();
+            let manager_mut = manager.get_mut();
+            let item: Option<&queue::Item> = manager_mut.queue_linked.front();
 
             if item.is_none() {
-                current_time + manager.get_mut().packet_interval
+                return (None, current_time + manager_mut.packet_interval)
             }
 
-            let unwrapped_item = item.unwrap();
+            let unwrapped_item: &mut queue::Item = item.unwrap().borrow_mut();
 
             if unwrapped_item.next_due_time == 0 {
-                &unwrapped_item.next_due_time = &current_time;
+                unwrapped_item.next_due_time = current_time;
             } else if unwrapped_item.next_due_time - current_time >= 1500000u128 {
-                unwrapped_item.next_due_time
+                return (None, unwrapped_item.next_due_time)
             }
 
-            let unsent_packet: packet::Unsent = self.queue_pop_packet(item);
+            let unsent_packet: packet::Unsent = self.queue_pop_packet(unwrapped_item);
 
-            manager.get_mut().queue_linked.push_back(manager.get_mut().queue_linked.pop_front().unwrap());
+            manager_mut.queue_linked.push_back(manager_mut.queue_linked.pop_front().unwrap());
 
             current_time = utils::timing_get_nano_secs();
 
-            if current_time - unwrapped_item.next_due_time >= 2 * (manager.get_mut().packet_interval) {
-                &unwrapped_item.next_due_time = current_time + (*manager.get_mut().packet_interval);
+            if current_time - unwrapped_item.next_due_time >= 2 * (manager_mut.packet_interval) {
+                unwrapped_item.next_due_time = (current_time + (manager_mut.packet_interval));
             } else {
-                &unwrapped_item.next_due_time = *manager.get_mut().packet_interval;
+                unwrapped_item.next_due_time = manager_mut.packet_interval;
             }
 
             (Some(unsent_packet), self.get_target_time(current_time))
         } else {
-            (None, 0);
+            (None, 0)
         }
     }
 
-    fn dispatch_packet(
+    async fn dispatch_packet(
+        &self,
         mut socket_vx: UdpSocket,
         unsent_packet: &packet::Unsent,
     ) {
         let remote_addr = unsent_packet.address.get(0).unwrap().sockaddr;
-        socket_vx.connect(remote_addr).await?;
-        socket_vx.send(unsent_packet.packet.data.as_ref()).await?;
+        socket_vx.connect(remote_addr).await;
+        socket_vx.send(unsent_packet.packet.data.as_ref()).await;
     }
 
-    fn process_with_socket(
+    async fn process_with_socket(
         &self
     ) {
-        let lock = self.boxed_manager_mutex.try_lock();
+        let lock = self.boxed_manager_mutex.try_lock().ok();
 
         if !lock.is_none() {
             let mut manager: MutexGuard<RefCell<queue::Manager>> = lock.unwrap();
@@ -297,22 +305,31 @@ impl Manager {
 
                 let (packet_to_send, target_time) = self.process_next(current_time);
 
-                drop(*manager);
-
                 if !packet_to_send.is_none() {
                     let unwrapped_pts = packet_to_send.unwrap();
 
                     if unwrapped_pts.explicit_socket.is_none() {
-                        let local_addr: SocketAddr = if remote_addr.is_ipv4() {
+                        let local_addr: SocketAddr = if unwrapped_pts.address.get(0).unwrap().sockaddr.is_ipv4() {
                             "0.0.0.0:0"
                         } else {
                             "[::]:0"
-                        }.parse()?;
-                        let socket_vx = UdpSocket::bind(local_addr).await?;
-                        self.dispatch_packet(socket_vx, *unwrapped_pts);
+                        }.parse().unwrap();
+                        let socket_vx = match UdpSocket::bind(local_addr).await {
+                            Ok(n) => n,
+                            Err(_) => {
+                                eprintln!("Can't bind!");
+                                break;
+                            }
+                        };
+                        self.dispatch_packet(socket_vx, unwrapped_pts.borrow());
                     } else {
+                        let temp_unsent_packet = packet::Unsent {
+                            packet: unwrapped_pts.packet,
+                            address: unwrapped_pts.address,
+                            explicit_socket: None,
+                        };
                         let unwrapped_socket = unwrapped_pts.explicit_socket.unwrap();
-                        self.dispatch_packet(unwrapped_socket, *unwrapped_pts);
+                        self.dispatch_packet(unwrapped_socket, &temp_unsent_packet);
                     }
 
                     current_time = utils::timing_get_nano_secs();
@@ -359,7 +376,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     me: JObject,
     instance: jlong,
 ) {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
     boxed_manager.destroy();
     drop(boxed_manager);
 }
@@ -371,7 +388,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jint {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
     boxed_manager.get_remaining_capacity(key as u64) as i32
 }
 
@@ -386,15 +403,18 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     data_buffer: jobject,
     data_length: jint,
 ) -> jboolean {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
-    let address: String = JString::from(address_string).into();
-    let bytes = JByteBuffer::from(data_buffer);
+    let address_const_i8 = jni.get_string_utf_chars(JString::from(address_string))
+        .expect("Couldn't get java string!") as *mut i8;
+    let address = unsafe { CString::from_raw(address_const_i8) }.into_string()
+        .expect("Couldn't get java string!");
+    let bytes = unsafe { slice::from_raw_parts(data_buffer as *const u8, data_length as usize) }.to_vec();
 
-    return if boxed_manager.queue_packet(key as u64, address, port, bytes.into(), data_length as usize, None) {
-        JNI_TRUE
+    return if boxed_manager.queue_packet(key as u64, address, port, bytes, data_length as usize, None) {
+        jni::sys::JNI_TRUE
     } else {
-        JNI_FALSE
+        jni::sys::JNI_FALSE
     }
 }
 
@@ -411,7 +431,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     socket_handle: jlong,
 ) -> jboolean {
     // It does not work. Also, this method isn't used in jda-nas.
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    /*let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
     let address: String = JString::from(address_string).into();
     let bytes = JByteBuffer::from(data_buffer);
@@ -424,10 +444,11 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
         data_length as usize,
         Some(unsafe { Box::from_raw(socket_handle as *mut UdpSocket) }.as_sock()),
     ) {
-        JNI_TRUE
+        jni::sys::JNI_TRUE
     } else {
-        JNI_FALSE
-    }
+        jni::sys::JNI_FALSE
+    }*/
+    unimplemented!("queuePacketWithSocket is not implemented!")
 }
 
 #[no_mangle]
@@ -437,12 +458,12 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jboolean {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
     if boxed_manager.queue_delete(key as u64) {
-        JNI_TRUE
+        jni::sys::JNI_TRUE
     } else {
-        JNI_FALSE
+        jni::sys::JNI_FALSE
     }
 }
 
@@ -454,7 +475,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     socket_v4: jlong,
     socket_v6: jlong,
 ) {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(*instance) };
+    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
     boxed_manager.process_with_socket();
 }
