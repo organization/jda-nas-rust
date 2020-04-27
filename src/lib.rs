@@ -115,17 +115,13 @@ impl<'a> Manager<'a> {
     fn queue_delete(&self, key: u64) -> bool {
         if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
             if let Some(item) = manager.queues.get_mut(&key) {
-                if item.buffer.size <= 0 {
-                    false
-                } else {
-                    while item.buffer.size > 0 {
-                        let index = item.buffer.index;
-                        item.buffer.index = (item.buffer.index + 1) % item.buffer.capacity;
-                        item.buffer.size -= 1;
-                        item.packet_buffer.remove(index);
-                    }
-                    true
+                while item.buffer.size > 0 {
+                    let index = item.buffer.index;
+                    item.buffer.index = (item.buffer.index + 1) % item.buffer.capacity;
+                    item.buffer.size -= 1;
+                    item.packet_buffer.remove(index);
                 }
+                true
             } else {
                 false
             }
@@ -154,35 +150,30 @@ impl<'a> Manager<'a> {
 
         let packet = item.packet_buffer.remove(index);
 
-        // let explicit_socket = item.explicit_socket.as_ref();
-
         let unsent_packet = packet::Unsent {
             packet,
             address: item.address.clone(),
-            explicit_socket: None,
         };
 
         return unsent_packet;
     }
 
-    fn process_next(&self, mut current_time: u128) -> (Option<packet::Unsent<'a>>, u128) {
+    fn process_next(&self, mut current_time: u128) -> (Option<packet::Unsent>, u128) {
         if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some(mut item) = manager.queue_linked.front_mut() {
+            if let Some(mut item) = manager.queue_linked.pop_front() {
                 if item.next_due_time == 0 {
                     item.next_due_time = current_time;
                 } else if item.next_due_time - current_time >= 1500000 {
                     return (None, item.next_due_time);
                 }
-                let packet = self.queue_pop_packet(item);
-                manager
-                    .queue_linked
-                    .push_back(manager.queue_linked.pop_front().unwrap());
+                let packet = self.queue_pop_packet(&mut item);
                 current_time = utils::timing_get_nano_secs();
                 if current_time - item.next_due_time >= 2 * (manager.packet_interval) {
                     item.next_due_time = current_time + manager.packet_interval;
                 } else {
                     item.next_due_time = manager.packet_interval;
                 }
+                manager.queue_linked.push_back(item);
                 (Some(packet), self.get_target_time(current_time))
             } else {
                 (None, current_time + manager.packet_interval)
@@ -192,7 +183,7 @@ impl<'a> Manager<'a> {
         }
     }
 
-    async fn dispatch_packet(&self, socket_vx: &mut UdpSocket, unsent_packet: &packet::Unsent<'_>) {
+    async fn dispatch_packet(&self, socket_vx: &mut UdpSocket, unsent_packet: &packet::Unsent) {
         let remote_addr = unsent_packet.address.get(0).unwrap().sockaddr;
         socket_vx.connect(remote_addr).await;
         socket_vx.send(unsent_packet.packet.data.as_ref()).await;
@@ -210,32 +201,21 @@ impl<'a> Manager<'a> {
                 let (packet_to_send, target_time) = self.process_next(current_time);
 
                 if let Some(packet_to_send) = packet_to_send {
-                    if let Some(mut explicit_socket) = packet_to_send.explicit_socket {
-                        let temp_unsent_packet = packet::Unsent {
-                            packet: packet_to_send.packet,
-                            address: packet_to_send.address,
-                            explicit_socket: None,
-                        };
-                        self.dispatch_packet(&mut explicit_socket, &temp_unsent_packet)
-                            .await;
-                    } else {
-                        let local_addr: SocketAddr =
-                            if packet_to_send.address.get(0).unwrap().sockaddr.is_ipv4() {
-                                "0.0.0.0:0"
-                            } else {
-                                "[::]:0"
-                            }
-                            .parse()
-                            .unwrap();
-                        let mut socket_vx = match UdpSocket::bind(local_addr).await {
-                            Ok(n) => n,
-                            Err(_) => {
-                                eprintln!("Can't bind!");
-                                break;
-                            }
-                        };
-                        self.dispatch_packet(&mut socket_vx, &packet_to_send).await;
-                    }
+                    let local_addr: SocketAddr =
+                        if packet_to_send.address.get(0).unwrap().sockaddr.is_ipv4() {
+                            "0.0.0.0:0"
+                        } else {
+                            "[::]:0"
+                        }
+                        .parse()
+                        .unwrap();
+                    let mut socket_vx = match UdpSocket::bind(local_addr).await {
+                        Ok(n) => n,
+                        Err(_) => {
+                            eprintln!("Can't bind!");
+                            break;
+                        }
+                    };
                     current_time = utils::timing_get_nano_secs();
                 }
 

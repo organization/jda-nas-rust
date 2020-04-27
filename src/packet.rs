@@ -4,8 +4,7 @@ pub struct Queued {
     pub data_length: usize,
 }
 
-pub struct Unsent<'a> {
+pub struct Unsent {
     pub packet: Queued,
     pub address: Vec<dns_lookup::AddrInfo>,
-    pub explicit_socket: Option<&'a mut tokio::net::UdpSocket>,
 }

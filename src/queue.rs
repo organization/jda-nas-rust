@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use crate::packet;
 
 pub struct Buffer {
