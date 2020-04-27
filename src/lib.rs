@@ -1,14 +1,14 @@
+use std::{slice, thread};
+use std::cell::RefCell;
 use std::ffi::{c_void, CString};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
 use std::time::Duration;
-use std::{slice, thread};
 
 use dns_lookup::AddrInfo;
-use jni::objects::{JObject, JString};
-use jni::sys::{jboolean, jint, jlong, jobject, jstring};
 use jni::JNIEnv;
+use jni::objects::{JByteBuffer, JObject, JString};
+use jni::sys::{jboolean, jint, jlong, jobject, jstring};
 use tokio::net::UdpSocket;
 
 mod packet;
@@ -213,8 +213,8 @@ impl<'a> Manager<'a> {
                         } else {
                             "[::]:0"
                         }
-                        .parse()
-                        .unwrap();
+                            .parse()
+                            .unwrap();
                     let mut socket_vx = match UdpSocket::bind(local_addr).await {
                         Ok(n) => n,
                         Err(_) => {
@@ -245,20 +245,20 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     me: JObject,
     queue_buffer_capacity: jint,
     packet_interval: jlong,
-) -> jlong {
+) -> *mut c_void {
     let boxed_manager: Box<Manager> = Box::new(Manager::new(
         queue_buffer_capacity as usize,
         packet_interval as u128,
     ));
 
-    Box::into_raw(boxed_manager) as jlong
+    Box::into_raw(boxed_manager) as *mut c_void
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_destroy(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
 ) {
     let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
     boxed_manager.destroy();
@@ -269,7 +269,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_getRemainingCapacity(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
     key: jlong,
 ) -> jint {
     let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
@@ -280,23 +280,19 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacket(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
     key: jlong,
-    address_string: jstring,
+    address_string: JString,
     port: jint,
-    data_buffer: jobject,
+    data_buffer: JByteBuffer,
     data_length: jint,
 ) -> jboolean {
     let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
-    let address_const_i8 = jni
-        .get_string_utf_chars(JString::from(address_string))
-        .expect("Couldn't get java string!") as *mut i8;
-    let address = unsafe { CString::from_raw(address_const_i8) }
-        .into_string()
-        .expect("Couldn't get java string!");
-    let bytes =
-        unsafe { slice::from_raw_parts(data_buffer as *const u8, data_length as usize) }.to_vec();
+    let address = jni.get_string(address_string)
+        .expect("Couldn't get java string!").into();
+    let bytes = jni.get_direct_buffer_address(data_buffer)
+        .expect("Couldn't get java ByteBuffer!").to_vec();
 
     return if boxed_manager.queue_packet(
         key as u64,
@@ -316,7 +312,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacketWithSocket(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
     key: jlong,
     address_string: jstring,
     port: jint,
@@ -349,7 +345,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_deleteQueue(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
     key: jlong,
 ) -> jboolean {
     let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
@@ -365,7 +361,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_processWithSocket(
     jni: JNIEnv,
     me: JObject,
-    instance: jlong,
+    instance: *mut c_void,
     socket_v4: jlong,
     socket_v6: jlong,
 ) {
