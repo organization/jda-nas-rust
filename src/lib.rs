@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CString};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 use std::time::Duration;
 use std::{slice, thread};
 
@@ -16,6 +17,11 @@ mod utils;
 
 pub struct Manager<'a> {
     pub boxed_manager_mutex: Arc<Mutex<Box<queue::Manager<'a>>>>,
+}
+
+thread_local! {
+    // TODO: proper error handling
+    static RUNTIME: RefCell<tokio::runtime::Runtime> = RefCell::new(tokio::runtime::Runtime::new().unwrap());
 }
 
 impl<'a> Manager<'a> {
@@ -365,7 +371,8 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 ) {
     let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
-    boxed_manager.process_with_socket();
+    let task = boxed_manager.process_with_socket();
+    RUNTIME.with(move |rt| rt.borrow_mut().block_on(task));
 }
 
 fn waiting_iterate_callback(
