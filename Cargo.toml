@@ -7,10 +7,16 @@ edition = "2018"
 [lib]
 crate_type = ["cdylib"]
 
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 dns-lookup = "1.0.2"
 jni = "0.16.0"
 tokio = { version = "0.2.19", features = ["udp"] }
-queues = "1.1.0"
