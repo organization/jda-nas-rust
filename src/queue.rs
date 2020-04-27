@@ -1,26 +1,40 @@
-mod queue {
-    use std::sync::Mutex;
+use std::sync::Mutex;
 
-    struct Buffer {
-        index: usize,
-        size: usize,
-        capacity: usize
-    }
+use crate::packet;
 
-    struct Item {
-        next_due_time: i64,
-        packet_buffer: packet::Queued,
-        buffer: Buffer,
-        address: dns_lookup::AddrInfo,
-        explicit_socket: tokio::net::UdpSocket
-    }
+pub struct Buffer {
+    pub index: usize,
+    pub size: usize,
+    pub capacity: usize,
+}
 
-    pub struct Manager {
-        queues: std::collections::HashMap<u64, Item>,
+pub struct Item {
+    pub next_due_time: i64,
+    pub packet_buffer: Vec<packet::Queued>,
+    pub buffer: Buffer,
+    pub address: Vec<dns_lookup::AddrInfo>,
+    pub explicit_socket: tokio::net::UdpSocket,
+}
+
+pub struct Manager {
+    queues: std::collections::HashMap<u64, Item>,
+    queue_buffer_capacity: usize,
+    packet_interval: i64,
+    shutting_down: bool,
+    queue_linked: std::collections::LinkedList<Item>,
+}
+
+impl Manager {
+    pub fn new(
         queue_buffer_capacity: usize,
         packet_interval: i64,
-        lock: Mutex<Manager>,
-        shutting_down: bool,
-        queue_linked: std::collections::LinkedList<Item>
+    ) -> Manager {
+        Manager {
+            queues: Default::default(),
+            queue_buffer_capacity,
+            packet_interval,
+            shutting_down: false,
+            queue_linked: Default::default(),
+        }
     }
 }

@@ -1,11 +1,9 @@
-mod packet {
-    pub struct Queued {
-        data: u8,
-        data_length: usize,
-    }
+pub struct Queued {
+    pub data: Vec<u8>,
+    pub data_length: usize,
+}
 
-    pub struct Unsent {
-        packet: Queued,
-        address: dns_lookup::AddrInfo,
-    }
+pub struct Unsent {
+    pub packet: Queued,
+    pub address: Vec<dns_lookup::AddrInfo>,
 }
