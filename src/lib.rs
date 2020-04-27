@@ -21,15 +21,15 @@ mod packet;
 mod queue;
 mod utils;
 
-pub struct Manager {
-    pub boxed_manager_mutex: Arc<Mutex<RefCell<queue::Manager>>>,
+pub struct Manager<'a> {
+    pub boxed_manager_mutex: Arc<Mutex<RefCell<queue::Manager<'a>>>>,
 }
 
-impl Manager {
+impl<'a> Manager<'a> {
     pub fn new(
         queue_buffer_capacity: usize,
         packet_interval: u128,
-    ) -> Manager {
+    ) -> Manager<'a> {
         Manager {
             boxed_manager_mutex: Arc::new(
                 Mutex::new(
@@ -84,7 +84,7 @@ impl Manager {
             socktype: dns_lookup::SockType::DGram.into(),
             protocol: dns_lookup::Protocol::UDP.into(),
             address: 0,
-            flags: 0 | 2
+            flags: 0 | 2,
         };
 
         dns_lookup::getaddrinfo(Some(address), Some(&(port.to_string())), Some(hints))
@@ -98,7 +98,7 @@ impl Manager {
         port: i32,
         data: Vec<u8>,
         data_length: usize,
-        explicit_socket: Option<UdpSocket>,
+        explicit_socket: Option<&'a mut UdpSocket>,
     ) -> bool {
         let lock = self.boxed_manager_mutex.try_lock().ok();
 
@@ -114,7 +114,7 @@ impl Manager {
                 );
 
                 if address.is_empty() {
-                    return false
+                    return false;
                 }
 
                 let manager_mut = manager.get_mut();
@@ -136,15 +136,15 @@ impl Manager {
                 manager.get_mut().queue_linked.push_front(inserted_item.unwrap());
             }
 
-            let item: Option<&queue::Item> = manager.get_mut().queues.get(key.borrow());
+            let item = manager.get_mut().queues.get_mut(key.borrow());
 
             if item.is_none() {
                 false
             } else {
-                let unwrapped_item = item.unwrap();
+                let mut unwrapped_item = item.unwrap();
 
                 if unwrapped_item.buffer.size >= unwrapped_item.buffer.capacity {
-                    return false
+                    return false;
                 }
 
                 let next_index = (unwrapped_item.buffer.index + unwrapped_item.buffer.size) % unwrapped_item.buffer.capacity;
@@ -169,15 +169,17 @@ impl Manager {
 
         if !ok_lock.is_none() {
             let mut manager = ok_lock.unwrap();
-            let item = manager.get_mut().queues.get(key.borrow());
+            let manager = manager.get_mut();
+            let queues = &mut manager.queues;
+            let item = queues.get_mut(key.borrow());
 
             if item.is_none() {
                 false
             } else {
-                let unwrapped_item = item.unwrap();
+                let mut unwrapped_item = item.unwrap();
 
                 if unwrapped_item.buffer.size <= 0 {
-                    return false
+                    return false;
                 }
 
                 while unwrapped_item.buffer.size > 0 {
@@ -186,7 +188,7 @@ impl Manager {
                     unwrapped_item.buffer.index = *((unwrapped_item.buffer.index + 1) % unwrapped_item.buffer.capacity).borrow();
                     unwrapped_item.buffer.size -= 1;
 
-                    (&unwrapped_item.packet_buffer).remove(index);
+                    unwrapped_item.packet_buffer.remove(index);
                 }
 
                 true
@@ -218,18 +220,22 @@ impl Manager {
 
     fn queue_pop_packet(
         &self,
-        item: &mut queue::Item,
-    ) -> packet::Unsent {
+        item: &'a mut queue::Item,
+    ) -> packet::Unsent<'a> {
         let index = item.buffer.index;
-        let _packet = item.packet_buffer[index];
 
         item.buffer.index = *((item.buffer.index + 1) % item.buffer.capacity).borrow();
         item.buffer.size -= 1;
 
+        let packet_buffer = &item.packet_buffer;
+        let packet = packet_buffer[index].clone();
+
+        // let explicit_socket = item.explicit_socket.as_ref();
+
         let unsent_packet = packet::Unsent {
-            packet: _packet,
-            address: item.address,
-            explicit_socket: item.explicit_socket,
+            packet,
+            address: item.address.clone(),
+            explicit_socket: None,
         };
 
         &item.packet_buffer.remove(index);
@@ -240,48 +246,49 @@ impl Manager {
     fn process_next(
         &self,
         mut current_time: u128,
-    ) -> (Option<packet::Unsent>, u128) {
-        let lock = self.boxed_manager_mutex.try_lock().ok();
-
-        if !lock.is_none() {
-            let mut manager = lock.unwrap();
-            let manager_mut = manager.get_mut();
-            let item: Option<&queue::Item> = manager_mut.queue_linked.front();
-
-            if item.is_none() {
-                return (None, current_time + manager_mut.packet_interval)
-            }
-
-            let unwrapped_item: &mut queue::Item = item.unwrap().borrow_mut();
-
-            if unwrapped_item.next_due_time == 0 {
-                unwrapped_item.next_due_time = current_time;
-            } else if unwrapped_item.next_due_time - current_time >= 1500000u128 {
-                return (None, unwrapped_item.next_due_time)
-            }
-
-            let unsent_packet: packet::Unsent = self.queue_pop_packet(unwrapped_item);
-
-            manager_mut.queue_linked.push_back(manager_mut.queue_linked.pop_front().unwrap());
-
-            current_time = utils::timing_get_nano_secs();
-
-            if current_time - unwrapped_item.next_due_time >= 2 * (manager_mut.packet_interval) {
-                unwrapped_item.next_due_time = (current_time + (manager_mut.packet_interval));
-            } else {
-                unwrapped_item.next_due_time = manager_mut.packet_interval;
-            }
-
-            (Some(unsent_packet), self.get_target_time(current_time))
-        } else {
-            (None, 0)
-        }
+    ) -> (Option<packet::Unsent<'a>>, u128) {
+        // let lock = self.boxed_manager_mutex.try_lock().ok();
+        //
+        // if !lock.is_none() {
+        //     let mut manager = lock.unwrap();
+        //     let manager_mut = manager.get_mut();
+        //     let item = manager_mut.queue_linked.front();
+        //
+        //     if item.is_none() {
+        //         return (None, current_time + manager_mut.packet_interval);
+        //     }
+        //
+        //     let unwrapped_item: &mut queue::Item = &mut item.unwrap().clone();
+        //
+        //     if unwrapped_item.next_due_time == 0 {
+        //         unwrapped_item.next_due_time = current_time;
+        //     } else if unwrapped_item.next_due_time - current_time >= 1500000u128 {
+        //         return (None, unwrapped_item.next_due_time);
+        //     }
+        //
+        //     let unsent_packet = self.queue_pop_packet(unwrapped_item);
+        //
+        //     manager_mut.queue_linked.push_back(manager_mut.queue_linked.pop_front().unwrap());
+        //
+        //     current_time = utils::timing_get_nano_secs();
+        //
+        //     if current_time - unwrapped_item.next_due_time >= 2 * (manager_mut.packet_interval) {
+        //         unwrapped_item.next_due_time = (current_time + (manager_mut.packet_interval));
+        //     } else {
+        //         unwrapped_item.next_due_time = manager_mut.packet_interval;
+        //     }
+        //
+        //     (Some(unsent_packet), self.get_target_time(current_time))
+        // } else {
+        //     (None, 0)
+        // }
+        (None, 0)
     }
 
     async fn dispatch_packet(
         &self,
-        mut socket_vx: UdpSocket,
-        unsent_packet: &packet::Unsent,
+        socket_vx: &mut UdpSocket,
+        unsent_packet: &packet::Unsent<'_>,
     ) {
         let remote_addr = unsent_packet.address.get(0).unwrap().sockaddr;
         socket_vx.connect(remote_addr).await;
@@ -314,22 +321,22 @@ impl Manager {
                         } else {
                             "[::]:0"
                         }.parse().unwrap();
-                        let socket_vx = match UdpSocket::bind(local_addr).await {
+                        let mut socket_vx = match UdpSocket::bind(local_addr).await {
                             Ok(n) => n,
                             Err(_) => {
                                 eprintln!("Can't bind!");
                                 break;
                             }
                         };
-                        self.dispatch_packet(socket_vx, unwrapped_pts.borrow());
+                        self.dispatch_packet(&mut socket_vx, unwrapped_pts.borrow());
                     } else {
                         let temp_unsent_packet = packet::Unsent {
                             packet: unwrapped_pts.packet,
                             address: unwrapped_pts.address,
                             explicit_socket: None,
                         };
-                        let unwrapped_socket = unwrapped_pts.explicit_socket.unwrap();
-                        self.dispatch_packet(unwrapped_socket, &temp_unsent_packet);
+                        let mut unwrapped_socket = &mut unwrapped_pts.explicit_socket.unwrap();
+                        self.dispatch_packet(&mut unwrapped_socket, &temp_unsent_packet);
                     }
 
                     current_time = utils::timing_get_nano_secs();
@@ -415,7 +422,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
         jni::sys::JNI_TRUE
     } else {
         jni::sys::JNI_FALSE
-    }
+    };
 }
 
 #[no_mangle]

@@ -8,27 +8,37 @@ pub struct Buffer {
     pub capacity: usize,
 }
 
-pub struct Item {
+impl Clone for Buffer {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index,
+            size: self.size,
+            capacity: self.capacity,
+        }
+    }
+}
+
+pub struct Item<'a> {
     pub next_due_time: u128,
     pub packet_buffer: Vec<packet::Queued>,
     pub buffer: Buffer,
     pub address: Vec<dns_lookup::AddrInfo>,
-    pub explicit_socket: Option<tokio::net::UdpSocket>,
+    pub explicit_socket: Option<&'a mut tokio::net::UdpSocket>,
 }
 
-pub struct Manager {
-    pub queues: std::collections::HashMap<u64, Item>,
+pub struct Manager<'a> {
+    pub queues: std::collections::HashMap<u64, Item<'a>>,
     pub queue_buffer_capacity: usize,
     pub packet_interval: u128,
     pub shutting_down: bool,
-    pub queue_linked: std::collections::LinkedList<Item>,
+    pub queue_linked: std::collections::LinkedList<Item<'a>>,
 }
 
-impl Manager {
-    pub fn new(
+impl Manager<'_> {
+    pub fn new<'a>(
         queue_buffer_capacity: usize,
         packet_interval: u128,
-    ) -> Manager {
+    ) -> Manager<'a> {
         Manager {
             queues: Default::default(),
             queue_buffer_capacity,
