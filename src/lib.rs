@@ -109,8 +109,11 @@ impl<'a> Manager<'a> {
                     false
                 } else {
                     let next_index = (item.buffer.index + item.buffer.size) % item.buffer.capacity;
-                    item.packet_buffer[next_index].data = data;
-                    item.packet_buffer[next_index].data_length = data_length;
+
+                    item.packet_buffer.insert(next_index, packet::Queued {
+                        data,
+                        data_length,
+                    });
                     item.buffer.size += 1;
                     true
                 }
