@@ -229,6 +229,7 @@ impl<'a> Manager<'a> {
                             break;
                         }
                     };
+                    self.dispatch_packet(&mut socket_vx, &packet_to_send).await;
                     current_time = utils::timing_get_nano_secs();
                 }
 
