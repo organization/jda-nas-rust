@@ -241,8 +241,8 @@ impl<'a> Manager<'a> {
         }
     }
 
-    fn process(&self) {
-        self.process_with_socket();
+    async fn process(&self) {
+        self.process_with_socket().await;
     }
 }
 
@@ -386,6 +386,21 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
         }
     } else {
         jni::sys::JNI_FALSE
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_process(
+    jni: JNIEnv,
+    me: JObject,
+    instance: jlong,
+) {
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
+
+    if let Some(manager) = manager.as_ref() {
+        let task = manager.process();
+        RUNTIME.with(move |rt| rt.borrow_mut().block_on(task));
     }
 }
 
