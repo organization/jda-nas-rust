@@ -1,14 +1,18 @@
+#[macro_use]
+extern crate lazy_static;
+
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::net::SocketAddr;
+use std::ops::Add;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use dns_lookup::AddrInfo;
+use jni::JNIEnv;
 use jni::objects::{JByteBuffer, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jobject, jstring};
-use jni::JNIEnv;
 use tokio::net::UdpSocket;
 
 mod packet;
@@ -239,39 +243,54 @@ impl<'a> Manager<'a> {
     }
 }
 
+lazy_static! {
+    pub static ref INDEX: Mutex<i64> = Mutex::new(i64::MIN);
+    pub static ref MANAGERS: Mutex<std::collections::HashMap<i64, Box<Manager<'static>>>> = Mutex::new(Default::default());
+}
+
+
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_create(
     jni: JNIEnv,
     me: JObject,
     queue_buffer_capacity: jint,
     packet_interval: jlong,
-) -> *mut c_void {
-    let boxed_manager: Box<Manager> = Box::new(Manager::new(
+) -> jlong {
+    let refcell_manager: Box<Manager> = Box::new(Manager::new(
         queue_buffer_capacity as usize,
         packet_interval as u128,
     ));
 
-    Box::into_raw(boxed_manager) as *mut c_void
+    let index = INDEX.lock().unwrap().clone();
+    MANAGERS.lock().unwrap().insert(index, refcell_manager);
+    *INDEX.lock().unwrap() += 1;
+    return index
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_destroy(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
 ) {
-    let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
-    boxed_manager.destroy();
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
+
+    if let Some(manager) = manager.as_ref() {
+        manager.destroy();
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_getRemainingCapacity(
+pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_getRemainingCapacity(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
     key: jlong,
 ) -> jint {
-    let manager = instance as *const Manager;
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
+
     if let Some(manager) = manager.as_ref() {
         manager.get_remaining_capacity(key as u64) as i32
     } else {
@@ -280,18 +299,16 @@ pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_nat
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacket(
+pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacket(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
     key: jlong,
     address_string: JString,
     port: jint,
     data_buffer: JByteBuffer,
     data_length: jint,
 ) -> jboolean {
-    let manager = instance as *const Manager;
-
     let address = jni
         .get_string(address_string)
         .expect("Couldn't get java string!")
@@ -300,6 +317,9 @@ pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_nat
         .get_direct_buffer_address(data_buffer)
         .expect("Couldn't get java ByteBuffer!")
         .to_vec();
+
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
         if manager.queue_packet(key as u64, address, port, bytes, data_length as usize, None) {
@@ -316,7 +336,7 @@ pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_nat
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacketWithSocket(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
     key: jlong,
     address_string: jstring,
     port: jint,
@@ -346,13 +366,14 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_deleteQueue(
+pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_deleteQueue(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
     key: jlong,
 ) -> jboolean {
-    let manager = instance as *const Manager;
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
         if manager.queue_delete(key as u64) {
@@ -366,14 +387,15 @@ pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_nat
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_processWithSocket(
+pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_processWithSocket(
     jni: JNIEnv,
     me: JObject,
-    instance: *mut c_void,
+    instance: jlong,
     socket_v4: jlong,
     socket_v6: jlong,
 ) {
-    let manager = instance as *const Manager;
+    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
         let task = manager.process_with_socket();
