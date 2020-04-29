@@ -25,21 +25,19 @@ pub struct Item<'a> {
 }
 
 pub struct Manager<'a> {
-    pub queues: std::collections::HashMap<u64, Item<'a>>,
+    pub queues: linked_hash_map::LinkedHashMap<u64, Item<'a>>,
     pub queue_buffer_capacity: usize,
     pub packet_interval: u128,
     pub shutting_down: bool,
-    pub queue_linked: std::collections::LinkedList<Item<'a>>,
 }
 
 impl Manager<'_> {
     pub fn new<'a>(queue_buffer_capacity: usize, packet_interval: u128) -> Manager<'a> {
         Manager {
-            queues: Default::default(),
+            queues: linked_hash_map::LinkedHashMap::new(),
             queue_buffer_capacity,
             packet_interval,
             shutting_down: false,
-            queue_linked: Default::default(),
         }
     }
 }

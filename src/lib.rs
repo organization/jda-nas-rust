@@ -145,7 +145,7 @@ impl<'a> Manager<'a> {
 
     fn get_target_time(&self, current_time: u128) -> u128 {
         if let Ok(manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some(item) = manager.queue_linked.front() {
+            if let Some((key, item)) = manager.queues.front() {
                 item.next_due_time
             } else {
                 current_time + manager.packet_interval
@@ -173,7 +173,7 @@ impl<'a> Manager<'a> {
 
     fn process_next(&self, mut current_time: u128) -> (Option<packet::Unsent>, u128) {
         if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some(mut item) = manager.queue_linked.pop_front() {
+            if let Some((key, mut item)) = manager.queues.pop_front() {
                 if item.next_due_time == 0 {
                     item.next_due_time = current_time;
                 } else if item.next_due_time - current_time >= 1500000 {
@@ -186,7 +186,7 @@ impl<'a> Manager<'a> {
                 } else {
                     item.next_due_time = manager.packet_interval;
                 }
-                manager.queue_linked.push_back(item);
+                manager.queues.insert(key, item);
                 (Some(packet), self.get_target_time(current_time))
             } else {
                 (None, current_time + manager.packet_interval)
