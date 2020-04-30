@@ -180,13 +180,19 @@ impl<'a> Manager<'a> {
                     return (None, item.next_due_time);
                 }
                 let packet = self.queue_pop_packet(&mut item);
+
+                let cloned_item = item.clone();
+
+                manager.queues.remove(&key);
+                manager.queues.insert(key, cloned_item);
+
                 current_time = utils::timing_get_nano_secs();
                 if current_time - item.next_due_time >= 2 * (manager.packet_interval) {
                     item.next_due_time = current_time + manager.packet_interval;
                 } else {
                     item.next_due_time = manager.packet_interval;
                 }
-                manager.queues.insert(key, item);
+
                 (Some(packet), self.get_target_time(current_time))
             } else {
                 (None, current_time + manager.packet_interval)

@@ -24,6 +24,18 @@ pub struct Item<'a> {
     pub explicit_socket: Option<&'a mut tokio::net::UdpSocket>,
 }
 
+impl Clone for Item<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            next_due_time: self.next_due_time,
+            packet_buffer: self.packet_buffer.clone(),
+            buffer: self.buffer.clone(),
+            address: self.address.clone(),
+            explicit_socket: None,
+        }
+    }
+}
+
 pub struct Manager<'a> {
     pub queues: linked_hash_map::LinkedHashMap<u64, Item<'a>>,
     pub queue_buffer_capacity: usize,
