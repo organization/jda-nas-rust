@@ -4,7 +4,7 @@ extern crate lazy_static;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ mod queue;
 mod utils;
 
 pub struct Manager<'a> {
-    pub boxed_manager_mutex: Arc<Mutex<Box<queue::Manager<'a>>>>,
+    pub boxed_manager_mutex: Arc<Mutex<queue::Manager<'a>>>,
 }
 
 thread_local! {
@@ -30,10 +30,10 @@ thread_local! {
 impl<'a> Manager<'a> {
     pub fn new(queue_buffer_capacity: usize, packet_interval: u128) -> Manager<'a> {
         Manager {
-            boxed_manager_mutex: Arc::new(Mutex::new(Box::new(queue::Manager::new(
+            boxed_manager_mutex: Arc::new(Mutex::new(queue::Manager::new(
                 queue_buffer_capacity,
                 packet_interval,
-            )))),
+            ))),
         }
     }
 
@@ -254,7 +254,7 @@ impl<'a> Manager<'a> {
 
 lazy_static! {
     pub static ref INDEX: Mutex<i64> = Mutex::new(i64::MIN);
-    pub static ref MANAGERS: Mutex<std::collections::HashMap<i64, Box<Manager<'static>>>> = Mutex::new(Default::default());
+    pub static ref MANAGERS: RwLock<std::collections::HashMap<i64, Box<Manager<'static>>>> = RwLock::new(Default::default());
 }
 
 
@@ -271,7 +271,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     ));
 
     let index = INDEX.lock().unwrap().clone();
-    MANAGERS.lock().unwrap().insert(index, refcell_manager);
+    MANAGERS.write().unwrap().insert(index, refcell_manager);
     *INDEX.lock().unwrap() += 1;
     index
 }
@@ -282,7 +282,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
@@ -297,7 +297,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jint {
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
@@ -327,7 +327,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
         .expect("Couldn't get java ByteBuffer!")
         .to_vec();
 
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
@@ -381,7 +381,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jboolean {
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
@@ -401,7 +401,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
@@ -418,7 +418,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _socket_v4: jlong,
     _socket_v6: jlong,
 ) {
-    let manager_mutex = MANAGERS.lock().unwrap();
+    let manager_mutex = MANAGERS.read().unwrap();
     let manager = manager_mutex.get(&instance);
 
     if let Some(manager) = manager.as_ref() {
