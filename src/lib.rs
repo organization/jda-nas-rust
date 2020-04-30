@@ -4,7 +4,6 @@ extern crate lazy_static;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::net::SocketAddr;
-use std::ops::Add;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -145,7 +144,7 @@ impl<'a> Manager<'a> {
 
     fn get_target_time(&self, current_time: u128) -> u128 {
         if let Ok(manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some((key, item)) = manager.queues.front() {
+            if let Some((_key, item)) = manager.queues.front() {
                 item.next_due_time
             } else {
                 current_time + manager.packet_interval
@@ -168,7 +167,7 @@ impl<'a> Manager<'a> {
             address: item.address.clone(),
         };
 
-        return unsent_packet;
+        unsent_packet
     }
 
     fn process_next(&self, mut current_time: u128) -> (Option<packet::Unsent>, u128) {
@@ -176,7 +175,7 @@ impl<'a> Manager<'a> {
             if let Some((key, mut item)) = manager.queues.pop_front() {
                 if item.next_due_time == 0 {
                     item.next_due_time = current_time;
-                } else if item.next_due_time - current_time >= 1500000 {
+                } else if item.next_due_time - current_time >= 1_500_000 {
                     return (None, item.next_due_time);
                 }
                 let packet = self.queue_pop_packet(&mut item);
@@ -204,8 +203,8 @@ impl<'a> Manager<'a> {
 
     async fn dispatch_packet(&self, socket_vx: &mut UdpSocket, unsent_packet: &packet::Unsent) {
         let remote_addr = unsent_packet.address.get(0).unwrap().sockaddr;
-        socket_vx.connect(remote_addr).await;
-        socket_vx.send(unsent_packet.packet.data.as_ref()).await;
+        socket_vx.connect(remote_addr).await.ok();
+        socket_vx.send(unsent_packet.packet.data.as_ref()).await.ok();
     }
 
     async fn process_with_socket(&self) {
@@ -241,7 +240,7 @@ impl<'a> Manager<'a> {
 
                 let wait_time = target_time - current_time;
 
-                if wait_time >= 1500000u128 {
+                if wait_time >= 1_500_000 {
                     thread::sleep(Duration::from_nanos(wait_time as u64))
                 }
             }
@@ -261,8 +260,8 @@ lazy_static! {
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_create(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     queue_buffer_capacity: jint,
     packet_interval: jlong,
 ) -> jlong {
@@ -274,13 +273,13 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     let index = INDEX.lock().unwrap().clone();
     MANAGERS.lock().unwrap().insert(index, refcell_manager);
     *INDEX.lock().unwrap() += 1;
-    return index
+    index
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_destroy(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     instance: jlong,
 ) {
     let manager_mutex = MANAGERS.lock().unwrap();
@@ -293,8 +292,8 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_getRemainingCapacity(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     instance: jlong,
     key: jlong,
 ) -> jint {
@@ -311,7 +310,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacket(
     jni: JNIEnv,
-    me: JObject,
+    _me: JObject,
     instance: jlong,
     key: jlong,
     address_string: JString,
@@ -344,15 +343,15 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_queuePacketWithSocket(
-    jni: JNIEnv,
-    me: JObject,
-    instance: jlong,
-    key: jlong,
-    address_string: jstring,
-    port: jint,
-    data_buffer: jobject,
-    data_length: jint,
-    socket_handle: jlong,
+    _jni: JNIEnv,
+    _me: JObject,
+    _instance: jlong,
+    _key: jlong,
+    _address_string: jstring,
+    _port: jint,
+    _data_buffer: jobject,
+    _data_length: jint,
+    _socket_handle: jlong,
 ) -> jboolean {
     // It does not work. Also, this method isn't used in jda-nas.
     /*let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
@@ -377,8 +376,8 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_deleteQueue(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     instance: jlong,
     key: jlong,
 ) -> jboolean {
@@ -398,8 +397,8 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_process(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     instance: jlong,
 ) {
     let manager_mutex = MANAGERS.lock().unwrap();
@@ -413,11 +412,11 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_processWithSocket(
-    jni: JNIEnv,
-    me: JObject,
+    _jni: JNIEnv,
+    _me: JObject,
     instance: jlong,
-    socket_v4: jlong,
-    socket_v6: jlong,
+    _socket_v4: jlong,
+    _socket_v6: jlong,
 ) {
     let manager_mutex = MANAGERS.lock().unwrap();
     let manager = manager_mutex.get(&instance);
@@ -428,21 +427,22 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     }
 }
 
+#[allow(dead_code)]
 fn waiting_iterate_callback(
-    class_tag: jlong,
-    size: jlong,
-    tag_ptr: *mut jlong,
-    length: jint,
-    user_data: *mut c_void,
+    _class_tag: jlong,
+    _size: jlong,
+    _tag_ptr: *mut jlong,
+    _length: jint,
+    _user_data: *mut c_void,
 ) -> jint {
     unimplemented!("waiting_iterate_callback is not implemented!")
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_pauseDemo(
-    jni: JNIEnv,
-    me: JObject,
-    length: jint,
+    _jni: JNIEnv,
+    _me: JObject,
+    _length: jint,
 ) {
     unimplemented!("pauseDemo is not implemented!")
 }
