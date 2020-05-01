@@ -1,138 +1,104 @@
-#[macro_use]
-extern crate lazy_static;
+use std::net::{IpAddr, UdpSocket};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::Instant;
+type Packet = Box<[u8]>;
+struct Queue {
+    rx: Receiver<Packet>,
+    last_sent: Instant,
+    socket: UdpSocket,
+}
 
-use std::cell::RefCell;
-use std::ffi::c_void;
-use std::net::SocketAddr;
+impl Queue {
+    fn new_channel(address: IpAddr, port: u16) -> (Self, Sender<Packet>) {
+        let (tx, rx) = channel();
+
+        let socket = if address.is_ipv4() {
+            UdpSocket::bind("0.0.0.0:0")
+        } else {
+            UdpSocket::bind("[::]:0")
+        }
+        .unwrap();
+
+        socket.connect((address, port)).unwrap();
+
+        (
+            Self {
+                rx,
+                last_sent: Instant::now(),
+                socket,
+            },
+            tx,
+        )
+    }
+
+    fn last_sent(&self) -> Instant {
+        self.last_sent
+    }
+
+    fn send(&mut self) {
+        self.last_sent = Instant::now();
+        if let Ok(packet) = self.rx.try_recv() {
+            self.socket.send(&packet).unwrap();
+        }
+    }
+}
+
+use indexmap::IndexMap;
+use std::collections::HashMap;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread;
 use std::time::Duration;
-
-use dns_lookup::AddrInfo;
-use jni::JNIEnv;
-use jni::objects::{JByteBuffer, JObject, JString};
-use jni::sys::{jboolean, jint, jlong, jobject, jstring};
-use tokio::net::UdpSocket;
-
-mod packet;
-mod queue;
-mod utils;
-
-pub struct Manager<'a> {
-    pub boxed_manager_mutex: Arc<Mutex<queue::Manager<'a>>>,
+struct Manager {
+    senders: Arc<RwLock<HashMap<i64, SyncSender<Packet>>>>,
+    queues: Arc<Mutex<IndexMap<i64, Queue>>>,
+    stop_tx: SyncSender<()>,
+    stop_rx: Receiver<()>,
+    capacity: usize,
+    interval: Duration,
 }
 
-thread_local! {
-    // TODO: proper error handling
-    static RUNTIME: RefCell<tokio::runtime::Runtime> = RefCell::new(tokio::runtime::Runtime::new().unwrap());
-}
-
-impl<'a> Manager<'a> {
-    pub fn new(queue_buffer_capacity: usize, packet_interval: u128) -> Manager<'a> {
-        Manager {
-            boxed_manager_mutex: Arc::new(Mutex::new(queue::Manager::new(
-                queue_buffer_capacity,
-                packet_interval,
-            ))),
+impl Manager {
+    fn new(capacity: usize, interval: Duration) -> Self {
+        let (stop_tx, stop_rx) = sync_channel(0);
+        Self {
+            senders: Default::default(),
+            queues: Default::default(),
+            stop_tx,
+            stop_rx,
+            capacity,
+            interval,
         }
     }
 
-    fn destroy(&self) {
-        if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            manager.shutting_down = true;
-        }
-    }
+    const TICK: Duration = Duration::from_millis(1);
 
-    fn get_remaining_capacity(&self, key: u64) -> usize {
-        if let Ok(manager) = self.boxed_manager_mutex.try_lock() {
-            let queue = manager.queues.get(&key);
-            if let Some(queue) = queue {
-                queue.buffer.capacity - queue.buffer.size
-            } else {
-                manager.queue_buffer_capacity as usize
-            }
-        } else {
-            0
-        }
-    }
+    fn process(&self) {
+        use std::sync::mpsc::TryRecvError;
 
-    fn resolve_address(&self, address: &str, port: i32) -> Vec<AddrInfo> {
-        let hints = dns_lookup::AddrInfoHints {
-            socktype: dns_lookup::SockType::DGram.into(),
-            protocol: dns_lookup::Protocol::UDP.into(),
-            address: 0,
-            flags: 0 | 2,
-        };
-
-        dns_lookup::getaddrinfo(Some(address), Some(&(port.to_string())), Some(hints))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .collect()
-    }
-
-    fn queue_packet(
-        &self,
-        key: u64,
-        address: String,
-        port: i32,
-        data: Vec<u8>,
-        data_length: usize,
-        explicit_socket: Option<&'a mut UdpSocket>,
-    ) -> bool {
-        if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            let key_exists = manager.queues.contains_key(&key);
-            if !key_exists {
-                let addresses = self.resolve_address(&address, port);
-                if addresses.is_empty() {
-                    return false;
+        while let Err(TryRecvError::Empty) = self.stop_rx.try_recv() {
+            if let Some((key, mut current_queue)) = self
+                .queues
+                .lock()
+                .ok()
+                .and_then(|mut q| q.shift_remove_index(0))
+            {
+                let stamp = Instant::now();
+                if stamp.duration_since(current_queue.last_sent()) >= self.interval {
+                    current_queue.send();
                 }
-                let capacity = manager.queue_buffer_capacity;
-                manager.queues.insert(
-                    key,
-                    queue::Item {
-                        next_due_time: 0,
-                        packet_buffer: vec![],
-                        buffer: queue::Buffer {
-                            index: 0,
-                            size: 0,
-                            capacity,
-                        },
-                        address: addresses,
-                        explicit_socket,
-                    },
-                );
-            }
-            if let Some(item) = manager.queues.get_mut(&key) {
-                if item.buffer.size >= item.buffer.capacity {
-                    false
-                } else {
-                    let next_index = (item.buffer.index + item.buffer.size) % item.buffer.capacity;
 
-                    item.packet_buffer.insert(next_index, packet::Queued {
-                        data,
-                        data_length,
-                    });
-                    item.buffer.size += 1;
-                    true
-                }
-            } else {
-                false
+                self.queues.lock().unwrap().insert(key, current_queue);
             }
-        } else {
-            false
+
+            std::thread::sleep(Self::TICK);
         }
     }
 
-    fn queue_delete(&self, key: u64) -> bool {
-        if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some(item) = manager.queues.get_mut(&key) {
-                while item.buffer.size > 0 {
-                    let index = item.buffer.index;
-                    item.buffer.index = (item.buffer.index + 1) % item.buffer.capacity;
-                    item.buffer.size -= 1;
-                    item.packet_buffer.remove(index);
-                }
+    fn delete_queue(&self, key: i64) -> bool {
+        if let Ok(mut senders) = self.senders.write() {
+            if let Ok(mut queues) = self.queues.lock() {
+                senders.remove(&key);
+                queues.shift_remove(&key);
                 true
             } else {
                 false
@@ -142,121 +108,44 @@ impl<'a> Manager<'a> {
         }
     }
 
-    fn get_target_time(&self, current_time: u128) -> u128 {
-        if let Ok(manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some((_key, item)) = manager.queues.front() {
-                item.next_due_time
+    fn queue_packet(&self, key: i64, address: String, port: u16, data: Vec<u8>) -> bool {
+        let packet: Packet = data.into_boxed_slice();
+        if let Ok(senders) = self.senders.read() {
+            if let Some(sender) = senders.get(&key) {
+                sender.send(packet).is_ok()
             } else {
-                current_time + manager.packet_interval
+                let address = match dns_lookup::lookup_host(&address) {
+                    Ok(vec) if !vec.is_empty() => vec[0],
+                    _ => return false,
+                };
+                let (queue, sender) = Queue::new_channel(address, port);
+                if let Ok(mut queues) = self.queues.lock() {
+                    queues.insert(key, queue);
+                }
+                sender.send(packet).is_ok()
             }
         } else {
-            current_time
+            false
         }
     }
 
-    fn queue_pop_packet(&self, item: &mut queue::Item) -> packet::Unsent {
-        let index = item.buffer.index;
-
-        item.buffer.index = (item.buffer.index + 1) % item.buffer.capacity;
-        item.buffer.size -= 1;
-
-        let packet = item.packet_buffer.remove(index);
-
-        let unsent_packet = packet::Unsent {
-            packet,
-            address: item.address.clone(),
-        };
-
-        unsent_packet
+    fn remaining_capacity(&self) -> usize {
+        self.capacity
     }
 
-    fn process_next(&self, mut current_time: u128) -> (Option<packet::Unsent>, u128) {
-        if let Ok(mut manager) = self.boxed_manager_mutex.try_lock() {
-            if let Some((key, mut item)) = manager.queues.pop_front() {
-                if item.next_due_time == 0 {
-                    item.next_due_time = current_time;
-                } else if item.next_due_time - current_time >= 1_500_000 {
-                    return (None, item.next_due_time);
-                }
-                let packet = self.queue_pop_packet(&mut item);
-
-                let cloned_item = item.clone();
-
-                manager.queues.remove(&key);
-                manager.queues.insert(key, cloned_item);
-
-                current_time = utils::timing_get_nano_secs();
-                if current_time - item.next_due_time >= 2 * (manager.packet_interval) {
-                    item.next_due_time = current_time + manager.packet_interval;
-                } else {
-                    item.next_due_time = manager.packet_interval;
-                }
-
-                (Some(packet), self.get_target_time(current_time))
-            } else {
-                (None, current_time + manager.packet_interval)
-            }
-        } else {
-            (None, 0)
-        }
-    }
-
-    async fn dispatch_packet(&self, socket_vx: &mut UdpSocket, unsent_packet: &packet::Unsent) {
-        let remote_addr = unsent_packet.address.get(0).unwrap().sockaddr;
-        socket_vx.connect(remote_addr).await.ok();
-        socket_vx.send(unsent_packet.packet.data.as_ref()).await.ok();
-    }
-
-    async fn process_with_socket(&self) {
-        if let Ok(manager) = self.boxed_manager_mutex.try_lock() {
-            loop {
-                if manager.shutting_down {
-                    break;
-                }
-
-                let mut current_time = utils::timing_get_nano_secs();
-
-                let (packet_to_send, target_time) = self.process_next(current_time);
-
-                if let Some(packet_to_send) = packet_to_send {
-                    let local_addr: SocketAddr =
-                        if packet_to_send.address.get(0).unwrap().sockaddr.is_ipv4() {
-                            "0.0.0.0:0"
-                        } else {
-                            "[::]:0"
-                        }
-                        .parse()
-                        .unwrap();
-                    let mut socket_vx = match UdpSocket::bind(local_addr).await {
-                        Ok(n) => n,
-                        Err(_) => {
-                            eprintln!("Can't bind!");
-                            break;
-                        }
-                    };
-                    self.dispatch_packet(&mut socket_vx, &packet_to_send).await;
-                    current_time = utils::timing_get_nano_secs();
-                }
-
-                let wait_time = target_time - current_time;
-
-                if wait_time >= 1_500_000 {
-                    thread::sleep(Duration::from_nanos(wait_time as u64))
-                }
-            }
-        }
-    }
-
-    async fn process(&self) {
-        self.process_with_socket().await;
+    fn stop(&self) {
+        self.stop_tx.send(()).ok();
     }
 }
 
-lazy_static! {
-    pub static ref INDEX: Mutex<i64> = Mutex::new(i64::MIN);
-    pub static ref MANAGERS: RwLock<std::collections::HashMap<i64, Box<Manager<'static>>>> = RwLock::new(Default::default());
+lazy_static::lazy_static! {
+    static ref MANAGER_STORAGE: Arc<Mutex<HashMap<usize, Manager>>> = Default::default();
 }
 
+use jni::objects::{JByteBuffer, JObject, JString};
+use jni::sys::{jboolean, jint, jlong, jobject, jstring};
+use jni::JNIEnv;
+use std::ffi::c_void;
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_create(
@@ -265,15 +154,14 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     queue_buffer_capacity: jint,
     packet_interval: jlong,
 ) -> jlong {
-    let refcell_manager: Box<Manager> = Box::new(Manager::new(
+    let manager = Manager::new(
         queue_buffer_capacity as usize,
-        packet_interval as u128,
-    ));
-
-    let index = INDEX.lock().unwrap().clone();
-    MANAGERS.write().unwrap().insert(index, refcell_manager);
-    *INDEX.lock().unwrap() += 1;
-    index
+        Duration::from_nanos(packet_interval as u64),
+    );
+    let mut storage = MANAGER_STORAGE.lock().unwrap();
+    let key = storage.len();
+    storage.insert(key, manager);
+    key as jlong
 }
 
 #[no_mangle]
@@ -282,11 +170,10 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        manager.destroy();
+    if let Ok(mut storage) = MANAGER_STORAGE.lock() {
+        if let Some(removed) = storage.remove(&(instance as usize)) {
+            removed.stop();
+        }
     }
 }
 
@@ -295,13 +182,14 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _jni: JNIEnv,
     _me: JObject,
     instance: jlong,
-    key: jlong,
+    _key: jlong,
 ) -> jint {
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        manager.get_remaining_capacity(key as u64) as i32
+    if let Ok(storage) = MANAGER_STORAGE.lock() {
+        if let Some(manager) = storage.get(&(instance as usize)) {
+            manager.remaining_capacity() as i32
+        } else {
+            0
+        }
     } else {
         0
     }
@@ -316,7 +204,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     address_string: JString,
     port: jint,
     data_buffer: JByteBuffer,
-    data_length: jint,
+    _data_length: jint,
 ) -> jboolean {
     let address = jni
         .get_string(address_string)
@@ -327,12 +215,13 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
         .expect("Couldn't get java ByteBuffer!")
         .to_vec();
 
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        if manager.queue_packet(key as u64, address, port, bytes, data_length as usize, None) {
-            jni::sys::JNI_TRUE
+    if let Ok(storage) = MANAGER_STORAGE.lock() {
+        if let Some(manager) = storage.get(&(instance as usize)) {
+            if manager.queue_packet(key, address, port as u16, bytes) {
+                jni::sys::JNI_TRUE
+            } else {
+                jni::sys::JNI_FALSE
+            }
         } else {
             jni::sys::JNI_FALSE
         }
@@ -381,12 +270,13 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jboolean {
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        if manager.queue_delete(key as u64) {
-            jni::sys::JNI_TRUE
+    if let Ok(storage) = MANAGER_STORAGE.lock() {
+        if let Some(manager) = storage.get(&(instance as usize)) {
+            if manager.delete_queue(key) {
+                jni::sys::JNI_TRUE
+            } else {
+                jni::sys::JNI_FALSE
+            }
         } else {
             jni::sys::JNI_FALSE
         }
@@ -401,12 +291,10 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        let task = manager.process();
-        RUNTIME.with(move |rt| rt.borrow_mut().block_on(task));
+    if let Ok(storage) = MANAGER_STORAGE.lock() {
+        if let Some(manager) = storage.get(&(instance as usize)) {
+            manager.process();
+        }
     }
 }
 
@@ -418,12 +306,10 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _socket_v4: jlong,
     _socket_v6: jlong,
 ) {
-    let manager_mutex = MANAGERS.read().unwrap();
-    let manager = manager_mutex.get(&instance);
-
-    if let Some(manager) = manager.as_ref() {
-        let task = manager.process_with_socket();
-        RUNTIME.with(move |rt| rt.borrow_mut().block_on(task));
+    if let Ok(storage) = MANAGER_STORAGE.lock() {
+        if let Some(manager) = storage.get(&(instance as usize)) {
+            manager.process();
+        }
     }
 }
 
