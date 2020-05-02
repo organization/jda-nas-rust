@@ -46,25 +46,20 @@ impl Queue {
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 struct Manager {
-    senders: Arc<RwLock<HashMap<i64, SyncSender<Packet>>>>,
+    senders: Arc<Mutex<HashMap<i64, Sender<Packet>>>>,
     queues: Arc<Mutex<IndexMap<i64, Queue>>>,
-    stop_tx: SyncSender<()>,
-    stop_rx: Receiver<()>,
     capacity: usize,
     interval: Duration,
 }
 
 impl Manager {
     fn new(capacity: usize, interval: Duration) -> Self {
-        let (stop_tx, stop_rx) = sync_channel(0);
         Self {
             senders: Default::default(),
             queues: Default::default(),
-            stop_tx,
-            stop_rx,
             capacity,
             interval,
         }
@@ -72,10 +67,10 @@ impl Manager {
 
     const TICK: Duration = Duration::from_millis(1);
 
-    fn process(&self) {
+    fn process(&self, stop_rx: Receiver<()>) {
         use std::sync::mpsc::TryRecvError;
 
-        while let Err(TryRecvError::Empty) = self.stop_rx.try_recv() {
+        while let Err(TryRecvError::Empty) = stop_rx.try_recv() {
             if let Some((key, mut current_queue)) = self
                 .queues
                 .lock()
@@ -95,7 +90,7 @@ impl Manager {
     }
 
     fn delete_queue(&self, key: i64) -> bool {
-        if let Ok(mut senders) = self.senders.write() {
+        if let Ok(mut senders) = self.senders.lock() {
             if let Ok(mut queues) = self.queues.lock() {
                 senders.remove(&key);
                 queues.shift_remove(&key);
@@ -110,7 +105,7 @@ impl Manager {
 
     fn queue_packet(&self, key: i64, address: String, port: u16, data: Vec<u8>) -> bool {
         let packet: Packet = data.into_boxed_slice();
-        if let Ok(senders) = self.senders.read() {
+        if let Ok(mut senders) = self.senders.lock() {
             if let Some(sender) = senders.get(&key) {
                 sender.send(packet).is_ok()
             } else {
@@ -122,7 +117,9 @@ impl Manager {
                 if let Ok(mut queues) = self.queues.lock() {
                     queues.insert(key, queue);
                 }
-                sender.send(packet).is_ok()
+                let ok = sender.send(packet).is_ok();
+                senders.insert(key, sender);
+                ok
             }
         } else {
             false
@@ -132,14 +129,11 @@ impl Manager {
     fn remaining_capacity(&self) -> usize {
         self.capacity
     }
-
-    fn stop(&self) {
-        self.stop_tx.send(()).ok();
-    }
 }
 
 lazy_static::lazy_static! {
-    static ref MANAGER_STORAGE: Arc<Mutex<HashMap<usize, Manager>>> = Default::default();
+    static ref MANAGER_STORAGE: Arc<Mutex<HashMap<usize, Arc<Manager>>>> = Default::default();
+    static ref STOPPER_STORAGE: Arc<Mutex<HashMap<usize, SyncSender<()>>>> = Default::default();
 }
 
 use jni::objects::{JByteBuffer, JObject, JString};
@@ -160,7 +154,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     );
     let mut storage = MANAGER_STORAGE.lock().unwrap();
     let key = storage.len();
-    storage.insert(key, manager);
+    storage.insert(key, Arc::new(manager));
     key as jlong
 }
 
@@ -170,10 +164,13 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    if let Ok(mut storage) = MANAGER_STORAGE.lock() {
-        if let Some(removed) = storage.remove(&(instance as usize)) {
-            removed.stop();
+    if let Ok(mut storage) = STOPPER_STORAGE.lock() {
+        if let Some(stopper) = storage.remove(&(instance as usize)) {
+            stopper.send(()).unwrap();
         }
+    }
+    if let Ok(mut storage) = MANAGER_STORAGE.lock() {
+        storage.remove(&(instance as usize));
     }
 }
 
@@ -270,13 +267,14 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     instance: jlong,
     key: jlong,
 ) -> jboolean {
-    if let Ok(storage) = MANAGER_STORAGE.lock() {
-        if let Some(manager) = storage.get(&(instance as usize)) {
-            if manager.delete_queue(key) {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
+    let manager = if let Ok(storage) = MANAGER_STORAGE.lock() {
+        storage.get(&(instance as usize)).cloned()
+    } else {
+        None
+    };
+    if let Some(manager) = manager {
+        if manager.delete_queue(key) {
+            jni::sys::JNI_TRUE
         } else {
             jni::sys::JNI_FALSE
         }
@@ -291,10 +289,17 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _me: JObject,
     instance: jlong,
 ) {
-    if let Ok(storage) = MANAGER_STORAGE.lock() {
-        if let Some(manager) = storage.get(&(instance as usize)) {
-            manager.process();
+    let manager = if let Ok(storage) = MANAGER_STORAGE.lock() {
+        storage.get(&(instance as usize)).cloned()
+    } else {
+        None
+    };
+    if let Some(manager) = manager {
+        let (stop_tx, stop_rx) = sync_channel(0);
+        if let Ok(mut storage) = STOPPER_STORAGE.lock() {
+            storage.insert(instance as usize, stop_tx);
         }
+        manager.process(stop_rx);
     }
 }
 
@@ -306,10 +311,17 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _socket_v4: jlong,
     _socket_v6: jlong,
 ) {
-    if let Ok(storage) = MANAGER_STORAGE.lock() {
-        if let Some(manager) = storage.get(&(instance as usize)) {
-            manager.process();
+    let manager = if let Ok(storage) = MANAGER_STORAGE.lock() {
+        storage.get(&(instance as usize)).cloned()
+    } else {
+        None
+    };
+    if let Some(manager) = manager {
+        let (stop_tx, stop_rx) = sync_channel(0);
+        if let Ok(mut storage) = STOPPER_STORAGE.lock() {
+            storage.insert(instance as usize, stop_tx);
         }
+        manager.process(stop_rx);
     }
 }
 
