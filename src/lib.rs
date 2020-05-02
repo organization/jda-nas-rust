@@ -46,10 +46,10 @@ impl Queue {
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 struct Manager {
-    senders: Arc<RwLock<HashMap<i64, SyncSender<Packet>>>>,
+    senders: Arc<Mutex<HashMap<i64, Sender<Packet>>>>,
     queues: Arc<Mutex<IndexMap<i64, Queue>>>,
     stop_tx: SyncSender<()>,
     stop_rx: Receiver<()>,
@@ -95,7 +95,7 @@ impl Manager {
     }
 
     fn delete_queue(&self, key: i64) -> bool {
-        if let Ok(mut senders) = self.senders.write() {
+        if let Ok(mut senders) = self.senders.lock() {
             if let Ok(mut queues) = self.queues.lock() {
                 senders.remove(&key);
                 queues.shift_remove(&key);
@@ -110,7 +110,7 @@ impl Manager {
 
     fn queue_packet(&self, key: i64, address: String, port: u16, data: Vec<u8>) -> bool {
         let packet: Packet = data.into_boxed_slice();
-        if let Ok(senders) = self.senders.read() {
+        if let Ok(mut senders) = self.senders.lock() {
             if let Some(sender) = senders.get(&key) {
                 sender.send(packet).is_ok()
             } else {
@@ -122,7 +122,9 @@ impl Manager {
                 if let Ok(mut queues) = self.queues.lock() {
                     queues.insert(key, queue);
                 }
-                sender.send(packet).is_ok()
+                let ok = sender.send(packet).is_ok();
+                senders.insert(key, sender);
+                ok
             }
         } else {
             false
