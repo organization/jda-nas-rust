@@ -1,7 +1,19 @@
+use indexmap::IndexMap;
+use jni::JNIEnv;
+use jni::objects::{JByteBuffer, JObject, JString};
+use jni::sys::{jboolean, jint, jlong, jobject, jstring};
+
+use std::collections::HashMap;
+use std::ffi::c_void;
 use std::net::{IpAddr, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::time::Duration;
 use std::time::Instant;
+
 type Packet = Box<[u8]>;
+
 struct Queue {
     rx: Receiver<Packet>,
     last_sent: Instant,
@@ -43,11 +55,6 @@ impl Queue {
     }
 }
 
-use indexmap::IndexMap;
-use std::collections::HashMap;
-use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 struct Manager {
     senders: Arc<Mutex<HashMap<i64, Sender<Packet>>>>,
     queues: Arc<Mutex<IndexMap<i64, Queue>>>,
@@ -135,11 +142,6 @@ lazy_static::lazy_static! {
     static ref MANAGER_STORAGE: Arc<Mutex<HashMap<usize, Arc<Manager>>>> = Default::default();
     static ref STOPPER_STORAGE: Arc<Mutex<HashMap<usize, SyncSender<()>>>> = Default::default();
 }
-
-use jni::objects::{JByteBuffer, JObject, JString};
-use jni::sys::{jboolean, jint, jlong, jobject, jstring};
-use jni::JNIEnv;
-use std::ffi::c_void;
 
 #[no_mangle]
 pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_UdpQueueManagerLibrary_create(
@@ -239,7 +241,7 @@ pub extern "system" fn Java_com_sedmelluq_discord_lavaplayer_udpqueue_natives_Ud
     _data_length: jint,
     _socket_handle: jlong,
 ) -> jboolean {
-    // It does not work. Also, this method isn't used in jda-nas.
+    // It does not work. Also, this method isn't used in jda-nas
     /*let boxed_manager: Box<Manager> = unsafe { Box::from_raw(instance as *mut Manager) };
 
     let address: String = JString::from(address_string).into();
