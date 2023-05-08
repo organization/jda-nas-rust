@@ -17,7 +17,7 @@ lto = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-dns-lookup = "1.0.3"
+dns-lookup = "2.0.1"
 jni = "0.21.0"
 lazy_static = "1.4.0"
 indexmap = "1.5.1"
