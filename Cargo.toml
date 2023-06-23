@@ -20,4 +20,4 @@ lto = true
 dns-lookup = "1.0.3"
 jni = "0.21.0"
 lazy_static = "1.4.0"
-indexmap = "1.5.1"
+indexmap = "2.0.0"
